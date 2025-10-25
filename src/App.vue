@@ -171,16 +171,24 @@ const preloadNextImage = () => {
 }
 
 const handleImageError = async () => {
-  console.error('Failed to load image:', images.value[currentImageIndex.value].src)
-  
-  // Try to reload the image data from Firestore
+  const failedSrc = images.value[currentImageIndex.value]?.src
+  console.error('Failed to load image:', failedSrc)
+
   try {
     const savedImages = await loadImagesFromFirestore()
     if (savedImages && savedImages.length > 0) {
-      images.value = savedImages
+      // Merge saved images with defaults, keep defaults if not present
+      const savedUrls = new Set(savedImages.map((img) => img.src))
+      const defaultsNotInSaved = defaultImages.filter((img) => !savedUrls.has(img.src))
+      images.value = [...defaultsNotInSaved, ...savedImages]
+
+      // Ensure current index is within bounds
+      if (currentImageIndex.value >= images.value.length) {
+        currentImageIndex.value = images.value.length - 1
+      }
     }
   } catch (error) {
-    console.error('Failed to reload images:', error)
+    console.error('Failed to reload/merge images:', error)
   }
 }
 
