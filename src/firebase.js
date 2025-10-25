@@ -1,5 +1,6 @@
-import { initializeApp } from 'firebase/app';
-import { getFirestore } from 'firebase/firestore';
+import { initializeApp } from 'firebase/app'
+import { getFirestore } from 'firebase/firestore'
+import { getStorage } from 'firebase/storage'
 
 // Firebase configuration
 const firebaseConfig = {
@@ -19,10 +20,14 @@ if (!firebaseConfig.projectId) {
 // Initialize Firebase
 const app = initializeApp(firebaseConfig);
 
-// Initialize Firestore with memory cache fallback
+// Initialize Firestore and Storage with region and custom domain
 const db = getFirestore(app);
+const storage = getStorage(app);
+
+// Note: CORS for Firebase Storage must be configured at the bucket level
+// via Google Cloud Console or gcloud/gsutil, not in client-side code.
 
 // Log successful initialization
 console.log('Firebase initialized successfully with project:', firebaseConfig.projectId);
 
-export { db };
+export { db, storage };

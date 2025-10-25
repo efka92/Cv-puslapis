@@ -1,15 +1,101 @@
 <script setup>
 import { ref, watch, onMounted } from 'vue'
 import { saveTableToFirestore, loadTableFromFirestore } from '@/services/tableService.js'
+import { saveImagesToFirestore, loadImagesFromFirestore, uploadImage } from '@/services/imageService.js'
 import imageOne from '@/assets/images/one.jpg'
 import imageTwo from '@/assets/images/two.jpg'
 
-const images = [
+// Initial default images
+const defaultImages = [
   { src: imageOne, alt: 'Image One' },
   { src: imageTwo, alt: 'Image Two' }
 ]
 
+const images = ref(defaultImages)
 const currentImageIndex = ref(0)
+const newImageUrl = ref('')
+const newImageAlt = ref('')
+
+// Image management functions
+const selectedFile = ref(null)
+const isUploading = ref(false)
+const fileInput = ref(null)
+
+const handleFileSelect = (event) => {
+  const file = event.target.files[0]
+  if (file && file.type.startsWith('image/')) {
+    selectedFile.value = file
+  } else {
+    alert('Please select an image file')
+  }
+}
+
+const addImage = async () => {
+  if (!selectedFile.value) {
+    alert('Please select an image file first')
+    return
+  }
+  
+  isUploading.value = true
+  try {
+    // Upload the file and get the URL
+    const downloadURL = await uploadImage(selectedFile.value)
+    
+    const newImage = {
+      src: downloadURL,
+      alt: newImageAlt.value.trim() || `Image ${images.value.length + 1}`
+    }
+    
+    const currentImages = [...images.value]
+    images.value.push(newImage)
+    
+    try {
+      await saveImagesToFirestore(images.value)
+      // Clear input fields only after successful save
+      newImageAlt.value = ''
+      selectedFile.value = null
+      if (fileInput.value) {
+        fileInput.value.value = '' // Reset file input
+      }
+    } catch (saveError) {
+      // Rollback on save error
+      images.value = currentImages
+      throw saveError
+    }
+  } catch (error) {
+    console.error('Failed to add image:', error)
+    alert('Failed to upload image. Please try again.')
+  } finally {
+    isUploading.value = false
+  }
+}
+
+const deleteImage = async (index) => {
+  if (images.value.length <= 1) return // Keep at least one image
+  if (index < 0 || index >= images.value.length) return // Invalid index
+  
+  try {
+    const currentImages = [...images.value]
+    const currentIndex = currentImageIndex.value
+    
+    images.value.splice(index, 1)
+    if (currentImageIndex.value >= images.value.length) {
+      currentImageIndex.value = images.value.length - 1
+    }
+    
+    try {
+      await saveImagesToFirestore(images.value)
+    } catch (saveError) {
+      // Rollback on save error
+      images.value = currentImages
+      currentImageIndex.value = currentIndex
+      throw saveError
+    }
+  } catch (error) {
+    console.error('Failed to delete image:', error)
+    alert('Failed to delete image. Please try again.')
+  }
+}
 
 // Load saved data from localStorage or use defaults
 const savedHeaderRow = localStorage.getItem('headerRow')
@@ -77,29 +163,37 @@ const clearTableData = () => {
   saveBoth()
 }
 
-// Try to load remote data from Firestore on mount (falls back to localStorage/defaults)
-onMounted(async () => {
+// Navigation functions
+const preloadNextImage = () => {
+  const nextIndex = (currentImageIndex.value + 1) % images.value.length
+  const img = new Image()
+  img.src = images.value[nextIndex].src
+}
+
+const handleImageError = async () => {
+  console.error('Failed to load image:', images.value[currentImageIndex.value].src)
+  
+  // Try to reload the image data from Firestore
   try {
-    const remote = await loadTableFromFirestore(FIRESTORE_DOC_ID)
-    if (remote && remote.headerRow && remote.tableData) {
-      headerRow.value = remote.headerRow
-      tableData.value = remote.tableData
-      // keep localStorage in sync
-      saveToLocalStorage()
+    const savedImages = await loadImagesFromFirestore()
+    if (savedImages && savedImages.length > 0) {
+      images.value = savedImages
     }
-  } catch (e) {
-    console.error('Failed loading from Firestore', e)
+  } catch (error) {
+    console.error('Failed to reload images:', error)
   }
-})
+}
 
 const nextImage = () => {
-  currentImageIndex.value = (currentImageIndex.value + 1) % images.length
+  currentImageIndex.value = (currentImageIndex.value + 1) % images.value.length
+  preloadNextImage() // Preload the next image
 }
 
 const previousImage = () => {
   currentImageIndex.value = currentImageIndex.value === 0 
-    ? images.length - 1 
+    ? images.value.length - 1 
     : currentImageIndex.value - 1
+  preloadNextImage() // Preload the next image
 }
 
 // Background color cycling
@@ -113,14 +207,50 @@ const cycleBackgroundColor = () => {
   localStorage.setItem('backgroundColor', currentColorIndex.value.toString())
 }
 
-// Load saved color preference on mount
-if (typeof window !== 'undefined') {
-  const savedColorIndex = localStorage.getItem('backgroundColor')
-  if (savedColorIndex !== null) {
-    currentColorIndex.value = parseInt(savedColorIndex)
-    document.body.style.backgroundColor = colors[currentColorIndex.value]
+// Initialize all data on mount
+onMounted(async () => {
+  // Load color preference
+  if (typeof window !== 'undefined') {
+    const savedColorIndex = localStorage.getItem('backgroundColor')
+    if (savedColorIndex !== null) {
+      currentColorIndex.value = parseInt(savedColorIndex)
+      document.body.style.backgroundColor = colors[currentColorIndex.value]
+    }
   }
-}
+
+  try {
+    // Load table data
+    const remote = await loadTableFromFirestore(FIRESTORE_DOC_ID)
+    if (remote && remote.headerRow && remote.tableData) {
+      headerRow.value = remote.headerRow
+      tableData.value = remote.tableData
+      saveToLocalStorage()
+    }
+
+    // Load images from Firestore
+    const savedImages = await loadImagesFromFirestore()
+    if (savedImages && savedImages.length > 0) {
+      // Filter out placeholder URLs that might fail to load
+      const validImages = savedImages.filter(img => 
+        img.src && 
+        !img.src.includes('via.placeholder.com')
+      )
+      
+      if (validImages.length > 0) {
+        // Merge with default local images if they're not already in the saved list
+        const savedUrls = new Set(validImages.map(img => img.src))
+        const defaultsNotInSaved = defaultImages.filter(img => !savedUrls.has(img.src))
+        
+        // Combine: defaults first, then saved Cloudinary images
+        images.value = [...defaultsNotInSaved, ...validImages]
+      }
+      // If no valid images from Firestore, keep the default local images
+    }
+  } catch (error) {
+    console.error('Failed to load data:', error)
+    // Continue with default values if loading fails
+  }
+})
 </script>
 
 <template>
@@ -134,17 +264,52 @@ if (typeof window !== 'undefined') {
     </div>
 
     <div class="image-slider">
-      <figure class="image is-128x128">
+      <figure class="image image-container">
         <img 
-          class="is-fullwidth" 
           :src="images[currentImageIndex].src" 
-          :alt="images[currentImageIndex].alt" 
+          :alt="images[currentImageIndex].alt"
+          @error="handleImageError"
+          ref="currentImage"
+          loading="eager"
         />
       </figure>
 
       <div class="buttons mt-3">
         <button class="button is-primary" @click="previousImage">Atgal</button>
         <button class="button is-primary" @click="nextImage">Sekanti</button>
+        <button 
+          class="button is-danger" 
+          @click="deleteImage(currentImageIndex)"
+          :disabled="images.length <= 1"
+          title="Ištrinti dabartinį paveikslėlį"
+        >
+          Ištrinti
+        </button>
+      </div>
+
+      <!-- Image Management Form -->
+      <div class="box mt-4">
+        <h3 class="subtitle">Pridėti naują paveikslėlį</h3>
+        <div class="field">
+          <label class="label">Pasirinkti paveikslėlį</label>
+          <div class="control">
+            <input 
+              class="input" 
+              type="file" 
+              ref="fileInput"
+              @change="handleFileSelect" 
+              accept="image/*"
+            >
+          </div>
+        </div>
+
+        <button 
+          class="button is-success" 
+          @click="addImage"
+          :disabled="!selectedFile || isUploading"
+        >
+          {{ isUploading ? 'Įkeliama...' : 'Pridėti paveikslėlį' }}
+        </button>
       </div>
     </div>
 
@@ -206,6 +371,22 @@ body {
   flex-direction: column;
   align-items: center;
   margin: 2rem auto;
+}
+
+.image-container {
+  width: 400px;
+  height: 300px;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.image-container img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  object-position: center;
 }
 
 .buttons {
